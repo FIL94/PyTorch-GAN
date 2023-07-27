@@ -2,11 +2,9 @@ import argparse
 import os
 import numpy as np
 
-import torchvision.transforms as transforms
 from torchvision.utils import save_image
 
 from torch.utils.data import DataLoader, Dataset
-from torchvision import datasets
 from torchvision.io import read_image
 from torch.autograd import Variable
 
@@ -17,7 +15,7 @@ os.makedirs("images", exist_ok=True)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("path", type=str, help="path to folder containing images")
-parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs of training")
+parser.add_argument("--n_epochs", type=int, default=10, help="number of epochs of training")
 parser.add_argument("--batch_size", type=int, default=10, help="size of the batches")
 parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
 parser.add_argument("--b1", type=float, default=0.5, help="adam: decay of first order momentum of gradient")
@@ -214,3 +212,5 @@ for epoch in range(opt.n_epochs):
         batches_done = epoch * len(dataloader) + i
         if batches_done % opt.sample_interval == 0:
             save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
+
+print("Training was finished!")
