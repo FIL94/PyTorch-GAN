@@ -1,31 +1,31 @@
 import argparse
 import os
 import numpy as np
-import math
 
 import torchvision.transforms as transforms
 from torchvision.utils import save_image
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets
+from torchvision.io import read_image
 from torch.autograd import Variable
 
 import torch.nn as nn
-import torch.nn.functional as F
 import torch
 
 os.makedirs("images", exist_ok=True)
 
 parser = argparse.ArgumentParser()
+parser.add_argument("path", type=str, help="path to folder containing images")
 parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs of training")
-parser.add_argument("--batch_size", type=int, default=64, help="size of the batches")
+parser.add_argument("--batch_size", type=int, default=10, help="size of the batches")
 parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
 parser.add_argument("--b1", type=float, default=0.5, help="adam: decay of first order momentum of gradient")
 parser.add_argument("--b2", type=float, default=0.999, help="adam: decay of first order momentum of gradient")
 parser.add_argument("--n_cpu", type=int, default=8, help="number of cpu threads to use during batch generation")
 parser.add_argument("--latent_dim", type=int, default=62, help="dimensionality of the latent space")
-parser.add_argument("--img_size", type=int, default=32, help="size of each image dimension")
-parser.add_argument("--channels", type=int, default=1, help="number of image channels")
+parser.add_argument("--img_size", type=int, default=512, help="size of each image dimension")
+parser.add_argument("--channels", type=int, default=3, help="number of image channels")
 parser.add_argument("--sample_interval", type=int, default=400, help="number of image channels")
 opt = parser.parse_args()
 print(opt)
@@ -33,6 +33,7 @@ print(opt)
 img_shape = (opt.channels, opt.img_size, opt.img_size)
 
 cuda = True if torch.cuda.is_available() else False
+print(f"Device: {'cuda' if cuda else 'cpu'}")
 
 
 def weights_init_normal(m):
@@ -52,6 +53,7 @@ class Generator(nn.Module):
         self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 128 * self.init_size ** 2))
 
         self.conv_blocks = nn.Sequential(
+            nn.BatchNorm2d(128),
             nn.Upsample(scale_factor=2),
             nn.Conv2d(128, 128, 3, stride=1, padding=1),
             nn.BatchNorm2d(128, 0.8),
@@ -80,10 +82,8 @@ class Discriminator(nn.Module):
         # Fully-connected layers
         self.down_size = opt.img_size // 2
         down_dim = 64 * (opt.img_size // 2) ** 2
-
-        self.embedding = nn.Linear(down_dim, 32)
-
         self.fc = nn.Sequential(
+            nn.Linear(down_dim, 32),
             nn.BatchNorm1d(32, 0.8),
             nn.ReLU(inplace=True),
             nn.Linear(32, down_dim),
@@ -95,14 +95,10 @@ class Discriminator(nn.Module):
 
     def forward(self, img):
         out = self.down(img)
-        embedding = self.embedding(out.view(out.size(0), -1))
-        out = self.fc(embedding)
+        out = self.fc(out.view(out.size(0), -1))
         out = self.up(out.view(out.size(0), 64, self.down_size, self.down_size))
-        return out, embedding
+        return out
 
-
-# Reconstruction loss of AE
-pixelwise_loss = nn.MSELoss()
 
 # Initialize generator and discriminator
 generator = Generator()
@@ -111,23 +107,28 @@ discriminator = Discriminator()
 if cuda:
     generator.cuda()
     discriminator.cuda()
-    pixelwise_loss.cuda()
 
 # Initialize weights
 generator.apply(weights_init_normal)
 discriminator.apply(weights_init_normal)
 
+
 # Configure data loader
-os.makedirs("../../data/mnist", exist_ok=True)
+class GirlsDataset(Dataset):
+    def __init__(self, path):
+        self.path = path
+        self.images = os.listdir(path)
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, item):
+        return read_image(os.path.join(self.path, self.images[item]))
+
+
+girlsDataset = GirlsDataset(opt.path)
 dataloader = torch.utils.data.DataLoader(
-    datasets.MNIST(
-        "../../data/mnist",
-        train=True,
-        download=True,
-        transform=transforms.Compose(
-            [transforms.Resize(opt.img_size), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
-        ),
-    ),
+    girlsDataset,
     batch_size=opt.batch_size,
     shuffle=True,
 )
@@ -138,26 +139,17 @@ optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt
 
 Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 
-
-def pullaway_loss(embeddings):
-    norm = torch.sqrt(torch.sum(embeddings ** 2, -1, keepdim=True))
-    normalized_emb = embeddings / norm
-    similarity = torch.matmul(normalized_emb, normalized_emb.transpose(1, 0))
-    batch_size = embeddings.size(0)
-    loss_pt = (torch.sum(similarity) - batch_size) / (batch_size * (batch_size - 1))
-    return loss_pt
-
-
 # ----------
 #  Training
 # ----------
 
 # BEGAN hyper parameters
-lambda_pt = 0.1
-margin = max(1, opt.batch_size / 64.0)
+gamma = 0.75
+lambda_k = 0.001
+k = 0.0
 
 for epoch in range(opt.n_epochs):
-    for i, (imgs, _) in enumerate(dataloader):
+    for i, imgs in enumerate(dataloader):
 
         # Configure input
         real_imgs = Variable(imgs.type(Tensor))
@@ -173,10 +165,9 @@ for epoch in range(opt.n_epochs):
 
         # Generate a batch of images
         gen_imgs = generator(z)
-        recon_imgs, img_embeddings = discriminator(gen_imgs)
 
         # Loss measures generator's ability to fool the discriminator
-        g_loss = pixelwise_loss(recon_imgs, gen_imgs.detach()) + lambda_pt * pullaway_loss(img_embeddings)
+        g_loss = torch.mean(torch.abs(discriminator(gen_imgs) - gen_imgs))
 
         g_loss.backward()
         optimizer_G.step()
@@ -188,26 +179,36 @@ for epoch in range(opt.n_epochs):
         optimizer_D.zero_grad()
 
         # Measure discriminator's ability to classify real from generated samples
-        real_recon, _ = discriminator(real_imgs)
-        fake_recon, _ = discriminator(gen_imgs.detach())
+        d_real = discriminator(real_imgs)
+        d_fake = discriminator(gen_imgs.detach())
 
-        d_loss_real = pixelwise_loss(real_recon, real_imgs)
-        d_loss_fake = pixelwise_loss(fake_recon, gen_imgs.detach())
-
-        d_loss = d_loss_real
-        if (margin - d_loss_fake.data).item() > 0:
-            d_loss += margin - d_loss_fake
+        d_loss_real = torch.mean(torch.abs(d_real - real_imgs))
+        d_loss_fake = torch.mean(torch.abs(d_fake - gen_imgs.detach()))
+        d_loss = d_loss_real - k * d_loss_fake
 
         d_loss.backward()
         optimizer_D.step()
+
+        # ----------------
+        # Update weights
+        # ----------------
+
+        diff = torch.mean(gamma * d_loss_real - d_loss_fake)
+
+        # Update weight term for fake samples
+        k = k + lambda_k * diff.item()
+        k = min(max(k, 0), 1)  # Constraint to interval [0, 1]
+
+        # Update convergence metric
+        M = (d_loss_real + torch.abs(diff)).data.item()
 
         # --------------
         # Log Progress
         # --------------
 
         print(
-            "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f]"
-            % (epoch, opt.n_epochs, i, len(dataloader), d_loss.item(), g_loss.item())
+            "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f] -- M: %f, k: %f"
+            % (epoch+1, opt.n_epochs, i, len(dataloader), d_loss.item(), g_loss.item(), M, k)
         )
 
         batches_done = epoch * len(dataloader) + i
