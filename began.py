@@ -1,32 +1,58 @@
 import argparse
 import os
+import sys
+from datetime import datetime
+
 import numpy as np
 
 from torchvision.utils import save_image
 
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.tensorboard import SummaryWriter
 from torchvision.io import read_image
 from torch.autograd import Variable
 
 import torch.nn as nn
 import torch
 
-os.makedirs("images", exist_ok=True)
+
+os.makedirs(os.path.join("trainig", "began", 'images'), exist_ok=True)
+os.makedirs(os.path.join("trainig", "began", 'checkpoints', 'generators'), exist_ok=True)
+os.makedirs(os.path.join("trainig", "began", 'checkpoints', 'discriminators'), exist_ok=True)
+os.makedirs(os.path.join("trainig", "began", 'metrics'), exist_ok=True)
+
+loger = SummaryWriter(os.path.join("trainig", "began", 'metrics', datetime.now().strftime('%Y_%m_%d %H_%M_%S')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("path", type=str, help="path to folder containing images")
-parser.add_argument("--n_epochs", type=int, default=10, help="number of epochs of training")
+parser.add_argument("--pretrained_models", type=int, default=None, help="number epoch for loading models")
+parser.add_argument("--n_epochs", type=int, default=5, help="number of epochs of training")
 parser.add_argument("--batch_size", type=int, default=10, help="size of the batches")
 parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
 parser.add_argument("--b1", type=float, default=0.5, help="adam: decay of first order momentum of gradient")
 parser.add_argument("--b2", type=float, default=0.999, help="adam: decay of first order momentum of gradient")
 parser.add_argument("--n_cpu", type=int, default=8, help="number of cpu threads to use during batch generation")
 parser.add_argument("--latent_dim", type=int, default=62, help="dimensionality of the latent space")
-parser.add_argument("--img_size", type=int, default=512, help="size of each image dimension")
+parser.add_argument("--img_size", type=int, default=128, help="size of each image dimension")
 parser.add_argument("--channels", type=int, default=3, help="number of image channels")
-parser.add_argument("--sample_interval", type=int, default=400, help="number of image channels")
+parser.add_argument("--sample_interval", type=int, default=10, help="number of epoch for generate images")
 opt = parser.parse_args()
 print(opt)
+
+if os.path.exists(os.path.join("trainig", "began", 'metrics', 'logs.txt')):
+    with open(os.path.join("trainig", "began", 'metrics', 'logs.txt'), 'r') as f:
+        f.seek(0)
+        lines = f.readlines()
+        lines = lines[:int(opt.pretrained_models)]
+        for line in lines:
+            epoch, g_loss, d_loss, M = line.split(' ')
+            loger.add_scalar("Generator loss", float(g_loss), int(epoch))
+            loger.add_scalar("Discriminator loss", float(d_loss), int(epoch))
+            loger.add_scalar("Convergence metric", float(M), int(epoch))
+    with open(os.path.join("trainig", "began", 'metrics', 'logs.txt'), 'a') as f:
+        f.seek(0)
+        f.truncate()
+        f.writelines(lines)
 
 img_shape = (opt.channels, opt.img_size, opt.img_size)
 
@@ -146,8 +172,29 @@ gamma = 0.75
 lambda_k = 0.001
 k = 0.0
 
-for epoch in range(opt.n_epochs):
+if opt.pretrained_models is not None:
+    try:
+        generator.load_state_dict(torch.load(os.path.join("trainig", "began", 'checkpoints', 'generators',
+                                                          f'model_{opt.pretrained_models}.pt')))
+        generator.train()
+        optimizer_G.load_state_dict(torch.load(os.path.join("trainig", "began", 'checkpoints', 'generators',
+                                                            f'optimizer_{opt.pretrained_models}.pt')))
+        discriminator.load_state_dict(torch.load(os.path.join("trainig", "began", 'checkpoints', 'discriminators',
+                                                              f'model_{opt.pretrained_models}.pt')))
+        discriminator.train()
+        optimizer_D.load_state_dict(torch.load(os.path.join("trainig", "began", 'checkpoints', 'discriminators',
+                                                            f'optimizer_{opt.pretrained_models}.pt')))
+        start_point = opt.pretrained_models
+    except:
+        print("Pretrained models was not found!")
+        sys.exit()
+else:
+    start_point = 0
+
+for epoch in range(start_point + 1, start_point + opt.n_epochs + 1):
     for i, imgs in enumerate(dataloader):
+        if imgs.shape[0] == 1:
+            continue
 
         # Configure input
         real_imgs = Variable(imgs.type(Tensor))
@@ -206,11 +253,23 @@ for epoch in range(opt.n_epochs):
 
         print(
             "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f] -- M: %f, k: %f"
-            % (epoch+1, opt.n_epochs, i, len(dataloader), d_loss.item(), g_loss.item(), M, k)
+            % (epoch, start_point + opt.n_epochs, i+1, len(dataloader), d_loss.item(), g_loss.item(), M, k)
         )
 
-        batches_done = epoch * len(dataloader) + i
-        if batches_done % opt.sample_interval == 0:
-            save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
+    loger.add_scalar("Generator loss", g_loss.item(), epoch)
+    loger.add_scalar("Discriminator loss", d_loss.item(), epoch)
+    loger.add_scalar("Convergence metric", M, epoch)
+    loger.flush()
+
+    with open(os.path.join("trainig", "began", 'metrics', 'logs.txt'), 'a') as f:
+        f.write(f"{epoch} {g_loss.item()} {d_loss.item()} {M}\n")
+
+    torch.save(generator.state_dict(), os.path.join("trainig", "began", 'checkpoints', 'generators', f'model_{epoch}.pt'))
+    torch.save(optimizer_G.state_dict(), os.path.join("trainig", "began", 'checkpoints', 'generators', f'optimizer_{epoch}.pt'))
+    torch.save(discriminator.state_dict(), os.path.join("trainig", "began", 'checkpoints', 'discriminators', f'model_{epoch}.pt'))
+    torch.save(optimizer_D.state_dict(), os.path.join("trainig", "began", 'checkpoints', 'discriminators', f'optimizer_{epoch}.pt'))
+    if epoch % opt.sample_interval == 0:
+        save_image(gen_imgs.data[:25], os.path.join("trainig", "began", 'images', f"epoch_{epoch}.png"), nrow=5, normalize=True)
 
 print("Training was finished!")
+loger.close()
