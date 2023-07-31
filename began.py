@@ -43,7 +43,8 @@ if os.path.exists(os.path.join("trainig", "began", 'metrics', 'logs.txt')):
     with open(os.path.join("trainig", "began", 'metrics', 'logs.txt'), 'r') as f:
         f.seek(0)
         lines = f.readlines()
-        lines = lines[:int(opt.pretrained_models)]
+        if opt.pretrained_models is not None:
+            lines = lines[:int(opt.pretrained_models)]
         for line in lines:
             epoch, g_loss, d_loss, M = line.split(' ')
             loger.add_scalar("Generator loss", float(g_loss), int(epoch))
