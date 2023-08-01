@@ -1,41 +1,70 @@
 import argparse
 import os
+import sys
+from datetime import datetime
 import numpy as np
-import math
 import itertools
 
-import torchvision.transforms as transforms
 from torchvision.utils import save_image
-
-from torch.utils.data import DataLoader
-from torchvision import datasets
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.io import read_image
 from torch.autograd import Variable
 
 import torch.nn as nn
-import torch.nn.functional as F
 import torch
 
-os.makedirs("images/static/", exist_ok=True)
-os.makedirs("images/varying_c1/", exist_ok=True)
-os.makedirs("images/varying_c2/", exist_ok=True)
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs of training")
-parser.add_argument("--batch_size", type=int, default=64, help="size of the batches")
+parser.add_argument("path", type=str, help="path to folder containing images")
+parser.add_argument("--log_dir", type=str, default=os.getcwd(), help="directory to save results")
+parser.add_argument("--pretrained_models", type=int, default=None, help="number epoch for loading models")
+parser.add_argument("--n_epochs", type=int, default=50, help="number of epochs of training")
+parser.add_argument("--batch_size", type=int, default=10, help="size of the batches")
 parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
 parser.add_argument("--b1", type=float, default=0.5, help="adam: decay of first order momentum of gradient")
 parser.add_argument("--b2", type=float, default=0.999, help="adam: decay of first order momentum of gradient")
 parser.add_argument("--n_cpu", type=int, default=8, help="number of cpu threads to use during batch generation")
 parser.add_argument("--latent_dim", type=int, default=62, help="dimensionality of the latent space")
 parser.add_argument("--code_dim", type=int, default=2, help="latent code")
-parser.add_argument("--n_classes", type=int, default=10, help="number of classes for dataset")
-parser.add_argument("--img_size", type=int, default=32, help="size of each image dimension")
-parser.add_argument("--channels", type=int, default=1, help="number of image channels")
-parser.add_argument("--sample_interval", type=int, default=400, help="interval between image sampling")
+parser.add_argument("--n_classes", type=int, default=1, help="number of classes for dataset")
+parser.add_argument("--img_size", type=int, default=256, help="size of each image dimension")
+parser.add_argument("--channels", type=int, default=3, help="number of image channels")
+parser.add_argument("--sample_interval", type=int, default=10, help="interval between image sampling")
 opt = parser.parse_args()
 print(opt)
 
+os.makedirs(os.path.join(opt.log_dir, "trainig", "infogan", 'images'), exist_ok=True)
+os.makedirs(os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'generators'), exist_ok=True)
+os.makedirs(os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'discriminators'), exist_ok=True)
+os.makedirs(os.path.join(opt.log_dir, "trainig", "infogan", 'metrics'), exist_ok=True)
+
+loger = SummaryWriter(os.path.join(opt.log_dir, "trainig", "infogan", 'metrics',
+                                   datetime.now().strftime('%Y_%m_%d %H_%M_%S')))
+
+if os.path.exists(os.path.join(opt.log_dir, "trainig", "infogan", 'metrics', 'logs.txt')):
+    if opt.pretrained_models is not None:
+        with open(os.path.join(opt.log_dir, "trainig", "infogan", 'metrics', 'logs.txt'), 'r') as f:
+            f.seek(0)
+            lines = f.readlines()
+            lines = lines[:int(opt.pretrained_models)]
+            for line in lines:
+                epoch, g_loss, d_loss, i_loss = line.split(' ')
+                loger.add_scalar("Generator loss", float(g_loss), int(epoch))
+                loger.add_scalar("Discriminator loss", float(d_loss), int(epoch))
+                loger.add_scalar("Info loss", float(i_loss), int(epoch))
+        with open(os.path.join(opt.log_dir, "trainig", "infogan", 'metrics', 'logs.txt'), 'a') as f:
+            f.seek(0)
+            f.truncate()
+            f.writelines(lines)
+    else:
+        os.remove(os.path.join(opt.log_dir, "trainig", "infogan", 'metrics', 'logs.txt'))
+
+img_shape = (opt.channels, opt.img_size, opt.img_size)
+
 cuda = True if torch.cuda.is_available() else False
+print(f"Device: {'cuda' if cuda else 'cpu'}")
 
 
 def weights_init_normal(m):
@@ -145,19 +174,27 @@ if cuda:
 generator.apply(weights_init_normal)
 discriminator.apply(weights_init_normal)
 
+
 # Configure data loader
-os.makedirs("../../data/mnist", exist_ok=True)
+class GirlsDataset(Dataset):
+    def __init__(self, path):
+        self.path = path
+        self.images = os.listdir(path)
+        self.transform = transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, item):
+        return [self.transform(read_image(os.path.join(self.path,
+                self.images[item])).div(torch.tensor([255]))), torch.tensor([0])]
+
+
+girlsDataset = GirlsDataset(opt.path)
 dataloader = torch.utils.data.DataLoader(
-    datasets.MNIST(
-        "../../data/mnist",
-        train=True,
-        download=True,
-        transform=transforms.Compose(
-            [transforms.Resize(opt.img_size), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
-        ),
-    ),
+    girlsDataset,
     batch_size=opt.batch_size,
-    shuffle=True,
+    shuffle=True
 )
 
 # Optimizers
@@ -170,6 +207,25 @@ optimizer_info = torch.optim.Adam(
 FloatTensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 LongTensor = torch.cuda.LongTensor if cuda else torch.LongTensor
 
+if opt.pretrained_models is not None:
+    try:
+        generator.load_state_dict(torch.load(os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'generators',
+                                                          f'model_{opt.pretrained_models}.pt')))
+        generator.train()
+        optimizer_G.load_state_dict(torch.load(os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'generators',
+                                                            f'optimizer_{opt.pretrained_models}.pt')))
+        discriminator.load_state_dict(torch.load(os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'discriminators',
+                                                              f'model_{opt.pretrained_models}.pt')))
+        discriminator.train()
+        optimizer_D.load_state_dict(torch.load(os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'discriminators',
+                                                            f'optimizer_{opt.pretrained_models}.pt')))
+        start_point = opt.pretrained_models
+    except:
+        print("Pretrained models was not found!")
+        sys.exit()
+else:
+    start_point = 0
+
 # Static generator inputs for sampling
 static_z = Variable(FloatTensor(np.zeros((opt.n_classes ** 2, opt.latent_dim))))
 static_label = to_categorical(
@@ -178,30 +234,14 @@ static_label = to_categorical(
 static_code = Variable(FloatTensor(np.zeros((opt.n_classes ** 2, opt.code_dim))))
 
 
-def sample_image(n_row, batches_done):
-    """Saves a grid of generated digits ranging from 0 to n_classes"""
-    # Static sample
-    z = Variable(FloatTensor(np.random.normal(0, 1, (n_row ** 2, opt.latent_dim))))
-    static_sample = generator(z, static_label, static_code)
-    save_image(static_sample.data, "images/static/%d.png" % batches_done, nrow=n_row, normalize=True)
-
-    # Get varied c1 and c2
-    zeros = np.zeros((n_row ** 2, 1))
-    c_varied = np.repeat(np.linspace(-1, 1, n_row)[:, np.newaxis], n_row, 0)
-    c1 = Variable(FloatTensor(np.concatenate((c_varied, zeros), -1)))
-    c2 = Variable(FloatTensor(np.concatenate((zeros, c_varied), -1)))
-    sample1 = generator(static_z, static_label, c1)
-    sample2 = generator(static_z, static_label, c2)
-    save_image(sample1.data, "images/varying_c1/%d.png" % batches_done, nrow=n_row, normalize=True)
-    save_image(sample2.data, "images/varying_c2/%d.png" % batches_done, nrow=n_row, normalize=True)
-
-
 # ----------
 #  Training
 # ----------
 
-for epoch in range(opt.n_epochs):
+for epoch in range(start_point + 1, start_point + opt.n_epochs + 1):
     for i, (imgs, labels) in enumerate(dataloader):
+        if imgs.shape[0] == 1:
+            continue
 
         batch_size = imgs.shape[0]
 
@@ -287,8 +327,23 @@ for epoch in range(opt.n_epochs):
 
         print(
             "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f] [info loss: %f]"
-            % (epoch, opt.n_epochs, i, len(dataloader), d_loss.item(), g_loss.item(), info_loss.item())
+            % (epoch, start_point + opt.n_epochs, i+1, len(dataloader), d_loss.item(), g_loss.item(), info_loss.item())
         )
-        batches_done = epoch * len(dataloader) + i
-        if batches_done % opt.sample_interval == 0:
-            sample_image(n_row=10, batches_done=batches_done)
+
+    loger.add_scalar("Generator loss", g_loss.item(), epoch)
+    loger.add_scalar("Discriminator loss", d_loss.item(), epoch)
+    loger.add_scalar("Info loss", info_loss.item(), epoch)
+    loger.flush()
+
+    with open(os.path.join(opt.log_dir, "trainig", "infogan", 'metrics', 'logs.txt'), 'a') as f:
+        f.write(f"{epoch} {g_loss.item()} {d_loss.item()} {info_loss.item()}\n")
+
+    torch.save(generator.state_dict(), os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'generators', f'model_{epoch}.pt'))
+    torch.save(optimizer_G.state_dict(), os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'generators', f'optimizer_{epoch}.pt'))
+    torch.save(discriminator.state_dict(), os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'discriminators', f'model_{epoch}.pt'))
+    torch.save(optimizer_D.state_dict(), os.path.join(opt.log_dir, "trainig", "infogan", 'checkpoints', 'discriminators', f'optimizer_{epoch}.pt'))
+    if epoch % opt.sample_interval == 0:
+        save_image(gen_imgs.data[:25], os.path.join(opt.log_dir, "trainig", "infogan", 'images', f"epoch_{epoch}.png"), nrow=5, normalize=True)
+
+print("Training was finished!")
+loger.close()

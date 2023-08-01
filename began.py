@@ -37,7 +37,8 @@ os.makedirs(os.path.join(opt.log_dir, "trainig", "began", 'checkpoints', 'genera
 os.makedirs(os.path.join(opt.log_dir, "trainig", "began", 'checkpoints', 'discriminators'), exist_ok=True)
 os.makedirs(os.path.join(opt.log_dir, "trainig", "began", 'metrics'), exist_ok=True)
 
-loger = SummaryWriter(os.path.join(opt.log_dir, "trainig", "began", 'metrics', datetime.now().strftime('%Y_%m_%d %H_%M_%S')))
+loger = SummaryWriter(os.path.join(opt.log_dir, "trainig", "began", 'metrics',
+                                   datetime.now().strftime('%Y_%m_%d %H_%M_%S')))
 
 if os.path.exists(os.path.join(opt.log_dir, "trainig", "began", 'metrics', 'logs.txt')):
     if opt.pretrained_models is not None:
