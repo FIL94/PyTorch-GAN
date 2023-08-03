@@ -198,6 +198,13 @@ if opt.pretrained_models is not None:
 else:
     start_point = 0
 
+if optimizer_G.param_groups[0]['lr'] != opt.lr:
+    for g in optimizer_G.param_groups:
+        g['lr'] = opt.lr
+if optimizer_D.param_groups[0]['lr'] != opt.lr:
+    for g in optimizer_D.param_groups:
+        g['lr'] = opt.lr
+
 for epoch in range(start_point + 1, start_point + opt.n_epochs + 1):
     for i, imgs in enumerate(dataloader):
         if imgs.shape[0] == 1:

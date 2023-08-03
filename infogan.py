@@ -233,6 +233,12 @@ static_label = to_categorical(
 )
 static_code = Variable(FloatTensor(np.zeros((opt.n_classes ** 2, opt.code_dim))))
 
+if optimizer_G.param_groups[0]['lr'] != opt.lr:
+    for g in optimizer_G.param_groups:
+        g['lr'] = opt.lr
+if optimizer_D.param_groups[0]['lr'] != opt.lr:
+    for g in optimizer_D.param_groups:
+        g['lr'] = opt.lr
 
 # ----------
 #  Training
